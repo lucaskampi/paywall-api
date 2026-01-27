@@ -41,6 +41,16 @@
 - Commit `go.mod` and `go.sum` for reproducible builds.
 - `data/`, `*.db`, and `.env` are ignored by `.gitignore`.
 
+**Deployment / env notes**
+- `FRONTEND_ORIGIN`: restrict CORS in production (defaults to `*` in dev if unset).
+- `DATABASE_URL`: path/DSN for SQLite (default `file:./data/paywall.db?...`).
+- `MIGRATIONS_DIR`: optional — consider using an absolute path or embedding migrations for production. Avoid relying on `./migrations` when running a built binary from other CWDs.
+- `NEXT_PUBLIC_WS_URL` / `WS_URL`: frontend may set this to the websocket endpoint (default `ws://localhost:8080/ws`).
+
+**Server timeouts**
+- The server uses conservative timeouts: `ReadHeaderTimeout`, `ReadTimeout`, `WriteTimeout`, and `IdleTimeout` to improve robustness in production. Adjust values in `main.go` as needed.
+
+
 If you want, I can add a short integration test or update `POST /pay` to return the created row id — tell me which.
 # paywall-api (scaffold)
 
