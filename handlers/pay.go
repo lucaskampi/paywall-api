@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"database/sql"
 	"encoding/json"
 	"net/http"
 
@@ -8,9 +9,11 @@ import (
 )
 
 var writeCh chan<- db.WriteRequest
+var dbConn *sql.DB
 
 // Init sets up handlers package with DB connection and writer channel.
-func Init(_ /* dbConn */ interface{}, ch chan<- db.WriteRequest) {
+func Init(conn *sql.DB, ch chan<- db.WriteRequest) {
+	dbConn = conn
 	writeCh = ch
 }
 
@@ -24,13 +27,14 @@ func Pay(w http.ResponseWriter, r *http.Request) {
 	var payload struct {
 		Name        string `json:"name"`
 		Link        string `json:"link"`
+		Email       string `json:"email"`
 		AmountCents int64  `json:"amount_cents"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 		http.Error(w, "invalid JSON", http.StatusBadRequest)
 		return
 	}
-	if payload.Name == "" || payload.Link == "" || payload.AmountCents <= 0 {
+	if payload.Name == "" || payload.AmountCents <= 0 {
 		http.Error(w, "missing fields", http.StatusBadRequest)
 		return
 	}
@@ -42,8 +46,8 @@ func Pay(w http.ResponseWriter, r *http.Request) {
 
 	errCh := make(chan error, 1)
 	writeCh <- db.WriteRequest{
-		Query: "INSERT INTO payments (name, link, amount_cents) VALUES (?, ?, ?)",
-		Args:  []interface{}{payload.Name, payload.Link, payload.AmountCents},
+		Query: "INSERT INTO payments (name, link, email, amount_cents) VALUES (?, ?, ?, ?)",
+		Args:  []interface{}{payload.Name, payload.Link, payload.Email, payload.AmountCents},
 		ErrCh: errCh,
 	}
 	if err := <-errCh; err != nil {
