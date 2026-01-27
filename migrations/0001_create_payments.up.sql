@@ -1,7 +1,8 @@
 CREATE TABLE payments (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   name TEXT NOT NULL,
-  link TEXT NOT NULL,
+  link TEXT,
+  email TEXT,
   amount_cents INTEGER NOT NULL,
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
