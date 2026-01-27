@@ -1,1 +1,4 @@
+data/
+*.db
+.env
 TODO.md
