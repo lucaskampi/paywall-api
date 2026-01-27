@@ -3,6 +3,7 @@ package db
 import (
 	"database/sql"
 	"errors"
+	"log"
 	"strings"
 	"time"
 
@@ -41,29 +42,32 @@ func StartWriter(db *sql.DB) (chan<- WriteRequest, func()) {
 						id, err := res.LastInsertId()
 						if err == nil {
 							// fetch the inserted row
-							var name, link, email, created string
+							var name string
+							var link sql.NullString
+							var email sql.NullString
+							var createdAt string
 							var amount int64
 							row := db.QueryRow("SELECT name, link, email, amount_cents, created_at FROM payments WHERE id = ?", id)
-							if err := row.Scan(&name, &link, &email, &amount); err == nil {
-								// created_at may be scanned into string; try to scan created_at separately
-								// re-query including created_at
-								row2 := db.QueryRow("SELECT created_at FROM payments WHERE id = ?", id)
-								_ = row2.Scan(&created)
-								// build payload
-								payload := map[string]interface{}{
-									"type": "payment_created",
-									"payment": map[string]interface{}{
-										"id":           id,
-										"name":         name,
-										"link":         link,
-										"email":        email,
-										"amount_cents": amount,
-										"created_at":   created,
-									},
-								}
-								// send broadcast
-								ws.Broadcast(payload)
+							if err := row.Scan(&name, &link, &email, &amount, &createdAt); err != nil {
+								log.Printf("failed to load inserted payment id=%d for broadcast: %v", id, err)
+								break
 							}
+
+							payload := map[string]interface{}{
+								// keep backward compatibility: some clients may expect either key
+								"type":  "payment_created",
+								"event": "payment.created",
+								"payment": map[string]interface{}{
+									"id":           id,
+									"name":         name,
+									"link":         link.String,
+									"email":        email.String,
+									"amount_cents": amount,
+									"created_at":   createdAt,
+								},
+							}
+							log.Printf("broadcasting payment_created id=%d name=%q amount_cents=%d", id, name, amount)
+							ws.Broadcast(payload)
 						}
 					}
 				}
