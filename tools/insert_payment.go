@@ -24,8 +24,8 @@ func main() {
 
 	errCh := make(chan error)
 	writeCh <- db.WriteRequest{
-		Query: "INSERT INTO payments (name, link, email, amount_cents) VALUES (?, ?, ?, ?)",
-		Args:  []interface{}{"Test User", "/pay/test", "test@example.com", 1500},
+		Query: "INSERT INTO payments (name, link, email, amount_cents, status, currency, provider) VALUES (?, ?, ?, ?, ?, ?, ?)",
+		Args:  []interface{}{"Test User", "/pay/test", "test@example.com", 1500, "paid", "usd", "manual"},
 		ErrCh: errCh,
 	}
 	if err := <-errCh; err != nil {
