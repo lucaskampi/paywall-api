@@ -35,6 +35,11 @@ func corsMiddleware(next http.Handler) http.Handler {
 }
 
 func main() {
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8080"
+	}
+
 	// connect to DB
 	dbConn, err := db.Connect()
 	if err != nil {
@@ -76,7 +81,7 @@ func main() {
 	})
 
 	srv := &http.Server{
-		Addr:              ":8080",
+		Addr:              ":" + port,
 		Handler:           corsMiddleware(http.DefaultServeMux),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       10 * time.Second,
@@ -85,7 +90,7 @@ func main() {
 	}
 
 	go func() {
-		log.Println("Server starting on :8080")
+		log.Printf("Server starting on :%s", port)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Printf("listen: %v", err)
 			os.Exit(1)
