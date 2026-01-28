@@ -28,7 +28,7 @@ func Leaderboard(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	rows, err := dbConn.Query("SELECT id, name, link, email, amount_cents, created_at FROM payments ORDER BY amount_cents DESC LIMIT 100")
+	rows, err := dbConn.Query("SELECT id, name, link, email, amount_cents, created_at FROM payments WHERE status = 'paid' ORDER BY amount_cents DESC LIMIT 100")
 	if err != nil {
 		http.Error(w, "db error", http.StatusInternalServerError)
 		return
