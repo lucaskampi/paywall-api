@@ -6,7 +6,9 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"time"
 
+	"github.com/lucaskampi/paywall-api/ws"
 	"github.com/stripe/stripe-go/v79"
 	"github.com/stripe/stripe-go/v79/webhook"
 )
@@ -42,6 +44,8 @@ func Webhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	alreadyProcessed := false
+
 	tx, err := dbConn.Begin()
 	if err != nil {
 		http.Error(w, "db begin failed", http.StatusInternalServerError)
@@ -60,10 +64,14 @@ func Webhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if ra, _ := res.RowsAffected(); ra == 0 {
-		_ = tx.Commit()
-		w.WriteHeader(http.StatusOK)
-		return
+		alreadyProcessed = true
 	}
+
+	// We still parse and broadcast on retries, even if alreadyProcessed,
+	// because WS clients may have connected after the first delivery.
+	var wsSessionID string
+	wsEventType := ""
+	wsData := map[string]interface{}{}
 
 	switch event.Type {
 	case "checkout.session.completed":
@@ -78,20 +86,28 @@ func Webhook(w http.ResponseWriter, r *http.Request) {
 			paymentIntentID = cs.PaymentIntent.ID
 		}
 
-		upd, err := tx.Exec(
-			"UPDATE payments SET status = ?, stripe_payment_intent_id = CASE WHEN ? != '' THEN ? ELSE stripe_payment_intent_id END, paid_at = COALESCE(paid_at, CURRENT_TIMESTAMP), updated_at = CURRENT_TIMESTAMP WHERE stripe_checkout_session_id = ?",
-			"paid",
-			paymentIntentID,
-			paymentIntentID,
-			cs.ID,
-		)
-		if err != nil {
-			http.Error(w, "db update failed", http.StatusInternalServerError)
-			return
-		}
-		if ra, _ := upd.RowsAffected(); ra == 0 {
-			http.Error(w, "payment not found", http.StatusInternalServerError)
-			return
+		wsSessionID = cs.ID
+		wsEventType = "stripe.checkout.session.completed"
+		wsData["session_id"] = cs.ID
+		wsData["payment_intent_id"] = paymentIntentID
+		wsData["status"] = "paid"
+
+		if !alreadyProcessed {
+			upd, err := tx.Exec(
+				"UPDATE payments SET status = ?, stripe_payment_intent_id = CASE WHEN ? != '' THEN ? ELSE stripe_payment_intent_id END, paid_at = COALESCE(paid_at, CURRENT_TIMESTAMP), updated_at = CURRENT_TIMESTAMP WHERE stripe_checkout_session_id = ?",
+				"paid",
+				paymentIntentID,
+				paymentIntentID,
+				cs.ID,
+			)
+			if err != nil {
+				http.Error(w, "db update failed", http.StatusInternalServerError)
+				return
+			}
+			if ra, _ := upd.RowsAffected(); ra == 0 {
+				http.Error(w, "payment not found", http.StatusInternalServerError)
+				return
+			}
 		}
 
 	case "checkout.session.expired":
@@ -101,14 +117,21 @@ func Webhook(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		_, err := tx.Exec(
-			"UPDATE payments SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE stripe_checkout_session_id = ?",
-			"expired",
-			cs.ID,
-		)
-		if err != nil {
-			http.Error(w, "db update failed", http.StatusInternalServerError)
-			return
+		wsSessionID = cs.ID
+		wsEventType = "stripe.checkout.session.expired"
+		wsData["session_id"] = cs.ID
+		wsData["status"] = "expired"
+
+		if !alreadyProcessed {
+			_, err := tx.Exec(
+				"UPDATE payments SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE stripe_checkout_session_id = ?",
+				"expired",
+				cs.ID,
+			)
+			if err != nil {
+				http.Error(w, "db update failed", http.StatusInternalServerError)
+				return
+			}
 		}
 
 	default:
@@ -122,6 +145,14 @@ func Webhook(w http.ResponseWriter, r *http.Request) {
 		}
 		http.Error(w, "db commit failed", http.StatusInternalServerError)
 		return
+	}
+
+	if wsEventType != "" && wsSessionID != "" {
+		ws.BroadcastToSession(wsSessionID, ws.Event{
+			Type: wsEventType,
+			Data: wsData,
+			At:   time.Now().UTC().Format(time.RFC3339Nano),
+		})
 	}
 
 	w.WriteHeader(http.StatusOK)
