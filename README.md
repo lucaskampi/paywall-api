@@ -2,20 +2,28 @@
 - **Repo**: Minimal scaffold for a pay-to-rank leaderboard backend in Go.
 
 **Quick Start (local)**
-- **Create data dir**: `mkdir -p data`
-- **Set DB URL**: `export DATABASE_URL="file:$(pwd)/data/paywall.db?_busy_timeout=5000&_foreign_keys=1"`
-- **Run migrations** (preferred):
-  - Install CLI once: `go install github.com/golang-migrate/migrate/v4/cmd/migrate@latest`
-  - Run: `migrate -path ./migrations -database sqlite3://$(pwd)/data/paywall.db up`
-- Or run programmatic runner: `go run tools/run_migrations.go`
-- **Start server**: `go run main.go`
+1. **Create data directory**: `mkdir -p data`
+2. **Copy environment template**: `cp .env.example .env`
+3. **Configure `.env`**:
+   - Add your Stripe keys (`STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`)
+   - Set success/cancel URLs for your frontend
+   - Optional: set `STRIPE_PRICE_ID` for fixed-price payments
+4. **Start server**: `./start.sh` (loads `.env` automatically)
+   - Or manually: `export $(grep -v '^#' .env | xargs) && go run .`
+
+**Stripe Webhook Setup (local testing)**
+- Install Stripe CLI: [stripe.com/docs/stripe-cli](https://stripe.com/docs/stripe-cli)
+- Run listener: `/path/to/stripe listen --forward-to http://localhost:8080/webhook`
+- Copy the webhook signing secret (`whsec_...`) to `.env` as `STRIPE_WEBHOOK_SECRET`
+- Trigger test events: `/path/to/stripe trigger checkout.session.completed`
 
 **Endpoints**
 - **GET /health**: health check
-- **GET /leaderboard**: leaderboard data
-- **POST /pay**: create a payment (expects JSON with `name`, `link`, `amount_cents`)
-- **POST /webhook**: payment provider webhooks
-- **GET /total**: total invested
+- **GET /leaderboard**: returns paid payments ordered by amount (highest first)
+- **POST /pay**: create a Stripe checkout session (expects JSON: `name`, `link`, `email`, `amount_cents`)
+- **POST /webhook**: Stripe webhook handler (verifies signature, updates payment status, broadcasts WS events)
+- **GET /total**: total amount invested
+- **GET /ws**: WebSocket endpoint for real-time leaderboard updates
 
 **Database & Migrations**
 - **Driver**: uses modernc.org/sqlite (pure-Go SQLite driver — no CGO required).
@@ -28,8 +36,10 @@
 - Writes are serialized by a single-writer goroutine (`db.StartWriter`) to avoid SQLITE_BUSY contention in-process. The handler `POST /pay` uses this writer.
 
 **Local helpers**
-- Inspect DB (pure-Go): `go run tools/inspect_db.go`
-- Insert a test payment via helper: `go run tools/insert_payment.go`
+- **Start server with env vars**: `./start.sh`
+- **Inspect DB** (pure-Go): `go run tools/inspect_db.go`
+- **Insert test payment**: `go run tools/insert_payment.go`
+- **Clear all payments**: `go run tools/clear_payments.go`
 
 **Files of interest**
 - `main.go` — app bootstrap (connects DB, runs migrations, starts writer, serves HTTP)
