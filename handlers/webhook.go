@@ -4,8 +4,10 @@ import (
 	"database/sql"
 	"encoding/json"
 	"io"
+	"log"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/lucaskampi/paywall-api/ws"
@@ -25,7 +27,7 @@ func Webhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	webhookSecret := os.Getenv("STRIPE_WEBHOOK_SECRET")
+	webhookSecret := strings.TrimSpace(os.Getenv("STRIPE_WEBHOOK_SECRET"))
 	if webhookSecret == "" {
 		http.Error(w, "missing STRIPE_WEBHOOK_SECRET", http.StatusInternalServerError)
 		return
@@ -38,8 +40,23 @@ func Webhook(w http.ResponseWriter, r *http.Request) {
 	}
 
 	sigHeader := r.Header.Get("Stripe-Signature")
-	event, err := webhook.ConstructEvent(body, sigHeader, webhookSecret)
+	if strings.TrimSpace(sigHeader) == "" {
+		log.Printf("stripe webhook: missing Stripe-Signature header")
+		http.Error(w, "missing signature", http.StatusBadRequest)
+		return
+	}
+	// Allow a bit more tolerance for clock skew (common in WSL/VMs).
+	// Accept events with a different API version than this library expects
+	// to avoid hard-failing local Stripe CLI deliveries. This sets a
+	// tolerance and opts into ignoring API version mismatches. In
+	// production you should set your webhook endpoint's API version to
+	// match the library or remove the ignore flag.
+	event, err := webhook.ConstructEventWithOptions(body, sigHeader, webhookSecret, webhook.ConstructEventOptions{
+		Tolerance:                10 * time.Minute,
+		IgnoreAPIVersionMismatch: true,
+	})
 	if err != nil {
+		log.Printf("stripe webhook: signature verification failed: %v", err)
 		http.Error(w, "invalid signature", http.StatusBadRequest)
 		return
 	}
@@ -77,6 +94,7 @@ func Webhook(w http.ResponseWriter, r *http.Request) {
 	case "checkout.session.completed":
 		var cs stripe.CheckoutSession
 		if err := json.Unmarshal(event.Data.Raw, &cs); err != nil {
+			log.Printf("stripe webhook: unmarshal checkout.session.completed failed: %v", err)
 			http.Error(w, "invalid event payload", http.StatusBadRequest)
 			return
 		}
@@ -105,14 +123,15 @@ func Webhook(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			if ra, _ := upd.RowsAffected(); ra == 0 {
-				http.Error(w, "payment not found", http.StatusInternalServerError)
-				return
+				// Log but don't fail - test events won't have a matching payment row
+				log.Printf("stripe webhook: no payment found for session %s (test event?)", cs.ID)
 			}
 		}
 
 	case "checkout.session.expired":
 		var cs stripe.CheckoutSession
 		if err := json.Unmarshal(event.Data.Raw, &cs); err != nil {
+			log.Printf("stripe webhook: unmarshal checkout.session.expired failed: %v", err)
 			http.Error(w, "invalid event payload", http.StatusBadRequest)
 			return
 		}
