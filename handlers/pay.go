@@ -158,14 +158,23 @@ func Pay(w http.ResponseWriter, r *http.Request) {
 	}
 
 	errCh := make(chan error, 1)
+	idCh := make(chan int64, 1)
 	writeCh <- db.WriteRequest{
 		Query: "INSERT INTO payments (name, link, email, amount_cents, status, currency, provider, stripe_checkout_session_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
 		Args:  []interface{}{payload.Name, payload.Link, payload.Email, amountCentsForDB, "pending", currencyForDB, "stripe", cs.ID},
 		ErrCh: errCh,
+		IDCh:  idCh,
 	}
 	if err := <-errCh; err != nil {
 		http.Error(w, "write failed", http.StatusInternalServerError)
 		return
+	}
+	// Wait for inserted id to be returned by writer (timeout is avoided because writer is local)
+	select {
+	case <-idCh:
+		// ok, inserted id received (ignored)
+	default:
+		// no id available
 	}
 
 	w.Header().Set("Content-Type", "application/json")
