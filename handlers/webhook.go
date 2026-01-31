@@ -153,6 +153,33 @@ func Webhook(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
+	case "payment_intent.succeeded":
+		var pi stripe.PaymentIntent
+		if err := json.Unmarshal(event.Data.Raw, &pi); err != nil {
+			log.Printf("stripe webhook: unmarshal payment_intent.succeeded failed: %v", err)
+			http.Error(w, "invalid event payload", http.StatusBadRequest)
+			return
+		}
+
+		wsEventType = "stripe.payment_intent.succeeded"
+		wsData["payment_intent_id"] = pi.ID
+		wsData["status"] = "paid"
+
+		if !alreadyProcessed {
+			upd, err := tx.Exec(
+				"UPDATE payments SET status = ?, paid_at = COALESCE(paid_at, CURRENT_TIMESTAMP), updated_at = CURRENT_TIMESTAMP WHERE stripe_payment_intent_id = ?",
+				"paid",
+				pi.ID,
+			)
+			if err != nil {
+				http.Error(w, "db update failed", http.StatusInternalServerError)
+				return
+			}
+			if ra, _ := upd.RowsAffected(); ra == 0 {
+				log.Printf("stripe webhook: no payment found for payment_intent %s (test event?)", pi.ID)
+			}
+		}
+
 	default:
 		// Ignore events we don't care about.
 	}
