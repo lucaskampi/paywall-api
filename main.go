@@ -72,6 +72,7 @@ func main() {
 	http.HandleFunc("/health", handlers.Health)
 	http.HandleFunc("/leaderboard", handlers.Leaderboard)
 	http.HandleFunc("/pay", handlers.Pay)
+	http.HandleFunc("/create-payment-intent", handlers.CreatePaymentIntent)
 	http.HandleFunc("/webhook", handlers.Webhook)
 	http.HandleFunc("/total", handlers.Total)
 

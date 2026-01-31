@@ -15,6 +15,7 @@ type WriteRequest struct {
 	Query string
 	Args  []interface{}
 	ErrCh chan error
+	IDCh  chan int64 // optional channel to return LastInsertId for inserts
 }
 
 // StartWriter starts a single goroutine that serializes write requests to the DB.
@@ -68,6 +69,10 @@ func StartWriter(db *sql.DB) (chan<- WriteRequest, func()) {
 							}
 							log.Printf("broadcasting payment_created id=%d name=%q amount_cents=%d", id, name, amount)
 							ws.Broadcast(payload)
+							// notify caller of inserted id, if requested
+							if wr.IDCh != nil {
+								wr.IDCh <- id
+							}
 						}
 					}
 				}
