@@ -2,9 +2,9 @@
 
 ## Payment Flow
 
-### Create Billing
+### Create Payment Intent
 
-**Endpoint:** `POST /pay`
+**Endpoint:** `POST /create-payment-intent`
 
 **Request:**
 
@@ -17,26 +17,44 @@
 }
 ```
 
-**Response (201):**
+**Response (200):**
 
 ```json
 {
-  "status": "created",
-  "checkout_url": "https://abacatepay.com/pay/...",
-  "session_id": "bill_123",
-  "billing_id": "bill_123"
+  "clientSecret": "pi_xxx_secret_xxx",
+  "paymentIntentId": "pi_xxx"
 }
 ```
 
-Use `checkout_url` to redirect the user to payment.
+Use `clientSecret` in Stripe Elements on the frontend.
 
 ---
 
-### Backward-Compatible Route
+### Confirm Payment
 
-**Endpoint:** `POST /create-payment-intent`
+**Endpoint:** `POST /pay/confirm`
 
-This route now uses the same AbacatePay billing flow as `/pay` and returns the same response shape.
+**Request:**
+
+```json
+{
+  "payment_intent_id": "pi_xxx",
+  "name": "Username",
+  "link": "https://twitter.com/user",
+  "email": "user@example.com",
+  "amount_cents": 5000
+}
+```
+
+This confirms the payment intent with Stripe and persists/updates the payment row.
+
+---
+
+### Compatibility Route
+
+**Endpoint:** `POST /pay`
+
+For backward compatibility this route currently delegates to `POST /create-payment-intent`.
 
 ---
 
@@ -46,7 +64,7 @@ This route now uses the same AbacatePay billing flow as `/pay` and returns the s
 - **GET /leaderboard** — Paid payments ordered by amount
 - **GET /total** — Total amount invested
 - **GET /ws** — WebSocket endpoint
-- **POST /webhook** — AbacatePay webhook receiver
+- **POST /webhook** — Stripe webhook receiver
 
 ---
 
@@ -56,16 +74,16 @@ Connect to `ws://localhost:8080/ws`
 
 **Events received:**
 - `payment.created` - new payment row created
-- `abacatepay.*` - provider webhook updates for subscribed billing id
+- `stripe.*` - provider webhook updates for subscribed payment intent
 
 **Subscribe commands:**
 
 ```json
-{"type": "subscribe", "session_id": "bill_123"}
+{"type": "subscribe", "session_id": "pi_xxx"}
 ```
 
 ```json
-{"type": "unsubscribe", "session_id": "bill_123"}
+{"type": "unsubscribe", "session_id": "pi_xxx"}
 ```
 
 ---
@@ -74,8 +92,6 @@ Connect to `ws://localhost:8080/ws`
 
 ```env
 DATABASE_URL=postgres://postgres:postgres@localhost:5432/paywall?sslmode=disable
-ABACATEPAY_API_KEY=your_api_key_here
-ABACATEPAY_BASE_URL=https://api.abacatepay.com
-ABACATEPAY_CREATE_PATH=/v1/billing/create
-ABACATEPAY_WEBHOOK_SECRET=
+STRIPE_SECRET_KEY=sk_test_xxx
+STRIPE_WEBHOOK_SECRET=whsec_xxx
 ```
