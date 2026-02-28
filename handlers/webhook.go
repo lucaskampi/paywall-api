@@ -1,8 +1,10 @@
 package handlers
 
 import (
+	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -11,11 +13,9 @@ import (
 	"time"
 
 	"github.com/lucaskampi/paywall-api/ws"
-	"github.com/stripe/stripe-go/v79"
-	"github.com/stripe/stripe-go/v79/webhook"
 )
 
-// Webhook processes payment provider webhooks (Stripe) and marks payments as paid.
+// Webhook processes payment provider webhooks (AbacatePay) and marks payments as paid.
 func Webhook(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		w.WriteHeader(http.StatusMethodNotAllowed)
@@ -27,38 +27,55 @@ func Webhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	webhookSecret := strings.TrimSpace(os.Getenv("STRIPE_WEBHOOK_SECRET"))
-	if webhookSecret == "" {
-		http.Error(w, "missing STRIPE_WEBHOOK_SECRET", http.StatusInternalServerError)
-		return
-	}
-
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		http.Error(w, "failed to read body", http.StatusBadRequest)
 		return
 	}
 
-	sigHeader := r.Header.Get("Stripe-Signature")
-	if strings.TrimSpace(sigHeader) == "" {
-		log.Printf("stripe webhook: missing Stripe-Signature header")
-		http.Error(w, "missing signature", http.StatusBadRequest)
+	webhookSecret := strings.TrimSpace(os.Getenv("ABACATEPAY_WEBHOOK_SECRET"))
+	if webhookSecret != "" {
+		signatureHeader := firstNonEmpty(
+			r.Header.Get("X-AbacatePay-Signature"),
+			r.Header.Get("AbacatePay-Signature"),
+		)
+		if !verifyAbacatePaySignature(body, signatureHeader, webhookSecret) {
+			log.Printf("abacatepay webhook: invalid signature")
+			http.Error(w, "invalid signature", http.StatusBadRequest)
+			return
+		}
+	}
+
+	var payload map[string]interface{}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		http.Error(w, "invalid payload", http.StatusBadRequest)
 		return
 	}
-	// Allow a bit more tolerance for clock skew (common in WSL/VMs).
-	// Accept events with a different API version than this library expects
-	// to avoid hard-failing local Stripe CLI deliveries. This sets a
-	// tolerance and opts into ignoring API version mismatches. In
-	// production you should set your webhook endpoint's API version to
-	// match the library or remove the ignore flag.
-	event, err := webhook.ConstructEventWithOptions(body, sigHeader, webhookSecret, webhook.ConstructEventOptions{
-		Tolerance:                10 * time.Minute,
-		IgnoreAPIVersionMismatch: true,
-	})
-	if err != nil {
-		log.Printf("stripe webhook: signature verification failed: %v", err)
-		http.Error(w, "invalid signature", http.StatusBadRequest)
-		return
+
+	eventType := firstNonEmpty(
+		nestedString(payload, []string{"event"}),
+		nestedString(payload, []string{"type"}),
+	)
+	billingID := firstNonEmpty(
+		nestedString(payload, []string{"data", "billing", "id"}),
+		nestedString(payload, []string{"data", "id"}),
+		nestedString(payload, []string{"billing", "id"}),
+		nestedString(payload, []string{"id"}),
+	)
+	status := normalizeProviderStatus(firstNonEmpty(
+		nestedString(payload, []string{"data", "status"}),
+		nestedString(payload, []string{"status"}),
+		eventType,
+	))
+
+	eventID := firstNonEmpty(
+		nestedString(payload, []string{"eventId"}),
+		nestedString(payload, []string{"event_id"}),
+		nestedString(payload, []string{"id"}),
+	)
+	if eventID == "" {
+		hash := sha256.Sum256(body)
+		eventID = fmt.Sprintf("body:%x", hash)
 	}
 
 	alreadyProcessed := false
@@ -72,9 +89,9 @@ func Webhook(w http.ResponseWriter, r *http.Request) {
 
 	// Idempotency: record the event id; if already processed, return 200.
 	res, err := tx.Exec(
-		"INSERT OR IGNORE INTO webhook_events (provider, event_id) VALUES (?, ?)",
-		"stripe",
-		event.ID,
+		"INSERT INTO webhook_events (provider, event_id) VALUES ($1, $2) ON CONFLICT (provider, event_id) DO NOTHING",
+		"abacatepay",
+		eventID,
 	)
 	if err != nil {
 		http.Error(w, "db write failed", http.StatusInternalServerError)
@@ -84,104 +101,37 @@ func Webhook(w http.ResponseWriter, r *http.Request) {
 		alreadyProcessed = true
 	}
 
-	// We still parse and broadcast on retries, even if alreadyProcessed,
-	// because WS clients may have connected after the first delivery.
-	var wsSessionID string
-	wsEventType := ""
+	// We still broadcast on retries because WS clients may connect after the first delivery.
+	wsSessionID := billingID
+	wsEventType := "abacatepay.webhook"
+	if eventType != "" {
+		wsEventType = "abacatepay." + strings.ToLower(strings.ReplaceAll(eventType, " ", "_"))
+	}
 	wsData := map[string]interface{}{}
+	wsData["billing_id"] = billingID
+	wsData["status"] = status
+	wsData["event"] = eventType
 
-	switch event.Type {
-	case "checkout.session.completed":
-		var cs stripe.CheckoutSession
-		if err := json.Unmarshal(event.Data.Raw, &cs); err != nil {
-			log.Printf("stripe webhook: unmarshal checkout.session.completed failed: %v", err)
-			http.Error(w, "invalid event payload", http.StatusBadRequest)
-			return
-		}
-
-		paymentIntentID := ""
-		if cs.PaymentIntent != nil {
-			paymentIntentID = cs.PaymentIntent.ID
-		}
-
-		wsSessionID = cs.ID
-		wsEventType = "stripe.checkout.session.completed"
-		wsData["session_id"] = cs.ID
-		wsData["payment_intent_id"] = paymentIntentID
-		wsData["status"] = "paid"
-
-		if !alreadyProcessed {
-			upd, err := tx.Exec(
-				"UPDATE payments SET status = ?, stripe_payment_intent_id = CASE WHEN ? != '' THEN ? ELSE stripe_payment_intent_id END, paid_at = COALESCE(paid_at, CURRENT_TIMESTAMP), updated_at = CURRENT_TIMESTAMP WHERE stripe_checkout_session_id = ?",
-				"paid",
-				paymentIntentID,
-				paymentIntentID,
-				cs.ID,
-			)
-			if err != nil {
+	if !alreadyProcessed && billingID != "" {
+		if status == "paid" {
+			if _, err := tx.Exec(
+				"UPDATE payments SET status = $1, paid_at = COALESCE(paid_at, CURRENT_TIMESTAMP), updated_at = CURRENT_TIMESTAMP WHERE provider_charge_id = $2",
+				status,
+				billingID,
+			); err != nil {
 				http.Error(w, "db update failed", http.StatusInternalServerError)
 				return
 			}
-			if ra, _ := upd.RowsAffected(); ra == 0 {
-				// Log but don't fail - test events won't have a matching payment row
-				log.Printf("stripe webhook: no payment found for session %s (test event?)", cs.ID)
-			}
-		}
-
-	case "checkout.session.expired":
-		var cs stripe.CheckoutSession
-		if err := json.Unmarshal(event.Data.Raw, &cs); err != nil {
-			log.Printf("stripe webhook: unmarshal checkout.session.expired failed: %v", err)
-			http.Error(w, "invalid event payload", http.StatusBadRequest)
-			return
-		}
-
-		wsSessionID = cs.ID
-		wsEventType = "stripe.checkout.session.expired"
-		wsData["session_id"] = cs.ID
-		wsData["status"] = "expired"
-
-		if !alreadyProcessed {
-			_, err := tx.Exec(
-				"UPDATE payments SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE stripe_checkout_session_id = ?",
-				"expired",
-				cs.ID,
-			)
-			if err != nil {
+		} else {
+			if _, err := tx.Exec(
+				"UPDATE payments SET status = $1, updated_at = CURRENT_TIMESTAMP WHERE provider_charge_id = $2",
+				status,
+				billingID,
+			); err != nil {
 				http.Error(w, "db update failed", http.StatusInternalServerError)
 				return
 			}
 		}
-
-	case "payment_intent.succeeded":
-		var pi stripe.PaymentIntent
-		if err := json.Unmarshal(event.Data.Raw, &pi); err != nil {
-			log.Printf("stripe webhook: unmarshal payment_intent.succeeded failed: %v", err)
-			http.Error(w, "invalid event payload", http.StatusBadRequest)
-			return
-		}
-
-		wsEventType = "stripe.payment_intent.succeeded"
-		wsData["payment_intent_id"] = pi.ID
-		wsData["status"] = "paid"
-
-		if !alreadyProcessed {
-			upd, err := tx.Exec(
-				"UPDATE payments SET status = ?, paid_at = COALESCE(paid_at, CURRENT_TIMESTAMP), updated_at = CURRENT_TIMESTAMP WHERE stripe_payment_intent_id = ?",
-				"paid",
-				pi.ID,
-			)
-			if err != nil {
-				http.Error(w, "db update failed", http.StatusInternalServerError)
-				return
-			}
-			if ra, _ := upd.RowsAffected(); ra == 0 {
-				log.Printf("stripe webhook: no payment found for payment_intent %s (test event?)", pi.ID)
-			}
-		}
-
-	default:
-		// Ignore events we don't care about.
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -193,7 +143,7 @@ func Webhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if wsEventType != "" && wsSessionID != "" {
+	if wsSessionID != "" {
 		ws.BroadcastToSession(wsSessionID, ws.Event{
 			Type: wsEventType,
 			Data: wsData,

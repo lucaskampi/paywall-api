@@ -40,7 +40,7 @@ func (c *client) Close(status websocket.StatusCode, reason string) error {
 type Hub struct {
 	mu      sync.Mutex
 	clients map[*client]struct{}
-	// subs maps a Stripe Checkout Session ID to subscribed clients.
+	// subs maps a provider session/billing ID to subscribed clients.
 	subs map[string]map[*client]struct{}
 	// clientSubs is the reverse index to allow cleanup on disconnect.
 	clientSubs map[*client]map[string]struct{}
@@ -89,7 +89,7 @@ func Broadcast(v interface{}) {
 	}
 }
 
-// BroadcastToSession sends a JSON-serializable message to clients subscribed to a Stripe Checkout Session ID.
+// BroadcastToSession sends a JSON-serializable message to clients subscribed to a provider session/billing ID.
 func BroadcastToSession(sessionID string, v interface{}) {
 	if sessionID == "" {
 		return

@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"net/http"
+	"time"
 )
 
 type Payment struct {
@@ -38,13 +39,15 @@ func Leaderboard(w http.ResponseWriter, r *http.Request) {
 	var out []Payment
 	for rows.Next() {
 		var p Payment
-		if err := rows.Scan(&p.ID, &p.Name, &p.Link, &p.Email, &p.AmountCents, &p.CreatedAt); err != nil {
+		var createdAt time.Time
+		if err := rows.Scan(&p.ID, &p.Name, &p.Link, &p.Email, &p.AmountCents, &createdAt); err != nil {
 			if err == sql.ErrNoRows {
 				break
 			}
 			http.Error(w, "db scan error", http.StatusInternalServerError)
 			return
 		}
+		p.CreatedAt = createdAt.UTC().Format(time.RFC3339)
 		out = append(out, p)
 	}
 
