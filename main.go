@@ -24,7 +24,7 @@ func corsMiddleware(next http.Handler) http.Handler {
 		}
 		w.Header().Set("Access-Control-Allow-Origin", origin)
 		w.Header().Set("Access-Control-Allow-Methods", "GET,POST,OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-AbacatePay-Signature, AbacatePay-Signature")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, Stripe-Signature")
 
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusOK)
@@ -68,6 +68,7 @@ func main() {
 	http.HandleFunc("/health", handlers.Health)
 	http.HandleFunc("/leaderboard", handlers.Leaderboard)
 	http.HandleFunc("/pay", handlers.Pay)
+	http.HandleFunc("/pay/confirm", handlers.PayConfirm)
 	http.HandleFunc("/create-payment-intent", handlers.CreatePaymentIntent)
 	http.HandleFunc("/webhook", handlers.Webhook)
 	http.HandleFunc("/total", handlers.Total)

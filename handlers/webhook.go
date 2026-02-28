@@ -1,21 +1,20 @@
 package handlers
 
 import (
-	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
-	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"os"
 	"strings"
 	"time"
 
 	"github.com/lucaskampi/paywall-api/ws"
+	"github.com/stripe/stripe-go/v82"
+	"github.com/stripe/stripe-go/v82/webhook"
 )
 
-// Webhook processes payment provider webhooks (AbacatePay) and marks payments as paid.
+// Webhook processes Stripe webhooks and marks payments as paid.
 func Webhook(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		w.WriteHeader(http.StatusMethodNotAllowed)
@@ -33,49 +32,49 @@ func Webhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	webhookSecret := strings.TrimSpace(os.Getenv("ABACATEPAY_WEBHOOK_SECRET"))
+	webhookSecret := strings.TrimSpace(os.Getenv("STRIPE_WEBHOOK_SECRET"))
 	if webhookSecret != "" {
-		signatureHeader := firstNonEmpty(
-			r.Header.Get("X-AbacatePay-Signature"),
-			r.Header.Get("AbacatePay-Signature"),
-		)
-		if !verifyAbacatePaySignature(body, signatureHeader, webhookSecret) {
-			log.Printf("abacatepay webhook: invalid signature")
+		signatureHeader := strings.TrimSpace(r.Header.Get("Stripe-Signature"))
+		if signatureHeader == "" {
+			http.Error(w, "missing signature", http.StatusBadRequest)
+			return
+		}
+		if _, err := webhook.ConstructEvent(body, signatureHeader, webhookSecret); err != nil {
 			http.Error(w, "invalid signature", http.StatusBadRequest)
 			return
 		}
 	}
 
-	var payload map[string]interface{}
-	if err := json.Unmarshal(body, &payload); err != nil {
+	var event stripe.Event
+	if err := json.Unmarshal(body, &event); err != nil {
 		http.Error(w, "invalid payload", http.StatusBadRequest)
 		return
 	}
 
-	eventType := firstNonEmpty(
-		nestedString(payload, []string{"event"}),
-		nestedString(payload, []string{"type"}),
-	)
-	billingID := firstNonEmpty(
-		nestedString(payload, []string{"data", "billing", "id"}),
-		nestedString(payload, []string{"data", "id"}),
-		nestedString(payload, []string{"billing", "id"}),
-		nestedString(payload, []string{"id"}),
-	)
-	status := normalizeProviderStatus(firstNonEmpty(
-		nestedString(payload, []string{"data", "status"}),
-		nestedString(payload, []string{"status"}),
-		eventType,
-	))
-
-	eventID := firstNonEmpty(
-		nestedString(payload, []string{"eventId"}),
-		nestedString(payload, []string{"event_id"}),
-		nestedString(payload, []string{"id"}),
-	)
+	eventType := strings.TrimSpace(string(event.Type))
+	eventID := strings.TrimSpace(event.ID)
 	if eventID == "" {
-		hash := sha256.Sum256(body)
-		eventID = fmt.Sprintf("body:%x", hash)
+		eventID = "no-event-id"
+	}
+
+	intentID := ""
+	status := "pending"
+	amountReceived := int64(0)
+
+	if event.Data.Raw != nil {
+		var intent stripe.PaymentIntent
+		if err := json.Unmarshal(event.Data.Raw, &intent); err == nil {
+			intentID = strings.TrimSpace(intent.ID)
+			status = normalizeProviderStatus(string(intent.Status))
+			if intent.AmountReceived > 0 {
+				amountReceived = intent.AmountReceived
+			}
+		}
+	}
+
+	if intentID == "" {
+		w.WriteHeader(http.StatusOK)
+		return
 	}
 
 	alreadyProcessed := false
@@ -90,7 +89,7 @@ func Webhook(w http.ResponseWriter, r *http.Request) {
 	// Idempotency: record the event id; if already processed, return 200.
 	res, err := tx.Exec(
 		"INSERT INTO webhook_events (provider, event_id) VALUES ($1, $2) ON CONFLICT (provider, event_id) DO NOTHING",
-		"abacatepay",
+		"stripe",
 		eventID,
 	)
 	if err != nil {
@@ -102,31 +101,29 @@ func Webhook(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// We still broadcast on retries because WS clients may connect after the first delivery.
-	wsSessionID := billingID
-	wsEventType := "abacatepay.webhook"
-	if eventType != "" {
-		wsEventType = "abacatepay." + strings.ToLower(strings.ReplaceAll(eventType, " ", "_"))
-	}
+	wsSessionID := intentID
+	wsEventType := "stripe." + strings.ToLower(strings.ReplaceAll(eventType, " ", "_"))
 	wsData := map[string]interface{}{}
-	wsData["billing_id"] = billingID
+	wsData["payment_intent_id"] = intentID
 	wsData["status"] = status
 	wsData["event"] = eventType
 
-	if !alreadyProcessed && billingID != "" {
+	if !alreadyProcessed {
 		if status == "paid" {
 			if _, err := tx.Exec(
-				"UPDATE payments SET status = $1, paid_at = COALESCE(paid_at, CURRENT_TIMESTAMP), updated_at = CURRENT_TIMESTAMP WHERE provider_charge_id = $2",
+				"UPDATE payments SET status = $1, amount_cents = CASE WHEN $2 > 0 THEN $2 ELSE amount_cents END, paid_at = COALESCE(paid_at, CURRENT_TIMESTAMP), updated_at = CURRENT_TIMESTAMP WHERE stripe_payment_intent_id = $3 OR provider_charge_id = $3",
 				status,
-				billingID,
+				amountReceived,
+				intentID,
 			); err != nil {
 				http.Error(w, "db update failed", http.StatusInternalServerError)
 				return
 			}
 		} else {
 			if _, err := tx.Exec(
-				"UPDATE payments SET status = $1, updated_at = CURRENT_TIMESTAMP WHERE provider_charge_id = $2",
+				"UPDATE payments SET status = $1, updated_at = CURRENT_TIMESTAMP WHERE stripe_payment_intent_id = $2 OR provider_charge_id = $2",
 				status,
-				billingID,
+				intentID,
 			); err != nil {
 				http.Error(w, "db update failed", http.StatusInternalServerError)
 				return

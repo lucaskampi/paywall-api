@@ -3,12 +3,12 @@ package handlers
 import (
 	"database/sql"
 	"encoding/json"
-	"fmt"
-	"log"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/lucaskampi/paywall-api/ws"
+	"github.com/stripe/stripe-go/v82"
 )
 
 var dbConn *sql.DB
@@ -18,29 +18,23 @@ func Init(conn *sql.DB) {
 	dbConn = conn
 }
 
-// Pay handles POST /pay and writes a payment row into the payments table.
+// Pay keeps backward compatibility by delegating to CreatePaymentIntent.
 func Pay(w http.ResponseWriter, r *http.Request) {
+	CreatePaymentIntent(w, r)
+}
+
+type payConfirmRequest struct {
+	PaymentIntentID string `json:"payment_intent_id"`
+	Name            string `json:"name"`
+	Link            string `json:"link"`
+	Email           string `json:"email"`
+	AmountCents     int64  `json:"amount_cents"`
+}
+
+// PayConfirm verifies the Stripe payment intent and stores it in the DB.
+func PayConfirm(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		w.WriteHeader(http.StatusMethodNotAllowed)
-		return
-	}
-
-	var payload struct {
-		Name        string `json:"name"`
-		Link        string `json:"link"`
-		Email       string `json:"email"`
-		AmountCents int64  `json:"amount_cents"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-		http.Error(w, "invalid JSON", http.StatusBadRequest)
-		return
-	}
-	if payload.Name == "" {
-		http.Error(w, "missing fields", http.StatusBadRequest)
-		return
-	}
-	if payload.AmountCents <= 0 {
-		http.Error(w, "missing fields", http.StatusBadRequest)
 		return
 	}
 
@@ -49,48 +43,95 @@ func Pay(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	client, err := newAbacatePayClientFromEnv()
+	var payload payConfirmRequest
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		http.Error(w, "invalid JSON", http.StatusBadRequest)
+		return
+	}
+
+	payload.Name = firstNonEmpty(payload.Name)
+	payload.Link = firstNonEmpty(payload.Link)
+	payload.Email = firstNonEmpty(payload.Email)
+	payload.PaymentIntentID = firstNonEmpty(payload.PaymentIntentID)
+
+	if payload.PaymentIntentID == "" || payload.Name == "" || payload.AmountCents <= 0 {
+		http.Error(w, "missing fields", http.StatusBadRequest)
+		return
+	}
+
+	stripeClient, err := newStripeClientFromEnv()
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	description := fmt.Sprintf("%s - %s", payload.Name, payload.Link)
-	billing, err := client.CreateBilling(payload.AmountCents, description, payload.Name, payload.Email)
+	intent, err := stripeClient.GetPaymentIntent(payload.PaymentIntentID)
 	if err != nil {
-		log.Printf("abacatepay create billing failed: %v", err)
-		http.Error(w, "failed to create abacatepay billing", http.StatusBadGateway)
+		http.Error(w, "failed to fetch payment intent", http.StatusBadGateway)
 		return
+	}
+
+	if intent.Status != stripe.PaymentIntentStatusSucceeded {
+		http.Error(w, "payment not completed", http.StatusBadRequest)
+		return
+	}
+
+	amountCents := payload.AmountCents
+	if intent.AmountReceived > 0 {
+		amountCents = intent.AmountReceived
 	}
 
 	var paymentID int64
 	var createdAt time.Time
 	if err := dbConn.QueryRow(
-		"INSERT INTO payments (name, link, email, amount_cents, status, currency, provider, provider_charge_id, provider_checkout_url) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id, created_at",
+		`INSERT INTO payments (name, link, email, amount_cents, status, currency, provider, provider_charge_id, stripe_payment_intent_id, paid_at, updated_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+		 ON CONFLICT (stripe_payment_intent_id)
+		 DO UPDATE SET
+		  name = EXCLUDED.name,
+		  link = EXCLUDED.link,
+		  email = EXCLUDED.email,
+		  amount_cents = EXCLUDED.amount_cents,
+		  status = EXCLUDED.status,
+		  provider = EXCLUDED.provider,
+		  provider_charge_id = EXCLUDED.provider_charge_id,
+		  paid_at = COALESCE(payments.paid_at, CURRENT_TIMESTAMP),
+		  updated_at = CURRENT_TIMESTAMP
+		 RETURNING id, created_at`,
 		payload.Name,
 		payload.Link,
 		payload.Email,
-		payload.AmountCents,
-		normalizeProviderStatus(billing.Status),
-		"brl",
-		"abacatepay",
-		billing.ID,
-		billing.URL,
+		amountCents,
+		"paid",
+		stringsToLowerOrDefault(string(intent.Currency), "usd"),
+		"stripe",
+		intent.ID,
+		intent.ID,
 	).Scan(&paymentID, &createdAt); err != nil {
 		http.Error(w, "write failed", http.StatusInternalServerError)
 		return
 	}
 
-	broadcastPaymentCreated(paymentID, payload.Name, payload.Link, payload.Email, payload.AmountCents, createdAt)
+	broadcastPaymentCreated(paymentID, payload.Name, payload.Link, payload.Email, amountCents, createdAt)
 
 	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusCreated)
-	json.NewEncoder(w).Encode(map[string]string{
-		"status":       "created",
-		"checkout_url": billing.URL,
-		"session_id":   billing.ID,
-		"billing_id":   billing.ID,
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		"id":           paymentID,
+		"name":         payload.Name,
+		"link":         payload.Link,
+		"email":        payload.Email,
+		"amount_cents": amountCents,
+		"status":       "paid",
+		"provider":     "stripe",
 	})
+}
+
+func stringsToLowerOrDefault(value string, fallback string) string {
+	v := strings.TrimSpace(strings.ToLower(value))
+	if v == "" {
+		return fallback
+	}
+	return v
 }
 
 func broadcastPaymentCreated(id int64, name string, link string, email string, amount int64, createdAt time.Time) {
