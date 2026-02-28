@@ -6,9 +6,9 @@ package main
 import (
 	"fmt"
 	"log"
+	"time"
 
 	"github.com/lucaskampi/paywall-api/db"
-	_ "modernc.org/sqlite"
 )
 
 func main() {
@@ -22,16 +22,16 @@ func main() {
 		log.Fatal(err)
 	}
 
-	writeCh, stop := db.StartWriter(d)
-	defer stop()
-
-	errCh := make(chan error)
-	writeCh <- db.WriteRequest{
-		Query: "INSERT INTO payments (name, link, email, amount_cents, status, currency, provider) VALUES (?, ?, ?, ?, ?, ?, ?)",
-		Args:  []interface{}{"Test User", "/pay/test", "test@example.com", 1500, "paid", "usd", "manual"},
-		ErrCh: errCh,
-	}
-	if err := <-errCh; err != nil {
+	if _, err := d.Exec(
+		"INSERT INTO payments (name, link, email, amount_cents, status, currency, provider) VALUES ($1, $2, $3, $4, $5, $6, $7)",
+		"Test User",
+		"/pay/test",
+		"test@example.com",
+		1500,
+		"paid",
+		"usd",
+		"manual",
+	); err != nil {
 		log.Fatal("write failed:", err)
 	}
 	fmt.Println("inserted")
@@ -45,10 +45,10 @@ func main() {
 		var id int64
 		var name, link string
 		var amount int64
-		var created string
+		var created time.Time
 		if err := rows.Scan(&id, &name, &link, &amount, &created); err != nil {
 			log.Fatal(err)
 		}
-		fmt.Printf("%d | %s | %s | %d | %s\n", id, name, link, amount, created)
+		fmt.Printf("%d | %s | %s | %d | %s\n", id, name, link, amount, created.UTC().Format(time.RFC3339))
 	}
 }

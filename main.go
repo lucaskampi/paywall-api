@@ -24,7 +24,7 @@ func corsMiddleware(next http.Handler) http.Handler {
 		}
 		w.Header().Set("Access-Control-Allow-Origin", origin)
 		w.Header().Set("Access-Control-Allow-Methods", "GET,POST,OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, Stripe-Signature")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-AbacatePay-Signature, AbacatePay-Signature")
 
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusOK)
@@ -58,12 +58,8 @@ func main() {
 		return
 	}
 
-	// start single-writer
-	writeCh, stopWriter := db.StartWriter(dbConn)
-	defer stopWriter()
-
-	// initialize handlers with DB writer
-	handlers.Init(dbConn, writeCh)
+	// initialize handlers with DB connection
+	handlers.Init(dbConn)
 
 	// register websocket endpoint
 	http.HandleFunc("/ws", ws.ServeWS)

@@ -1,29 +1,29 @@
 package db
 
 import (
-    "database/sql"
-    "fmt"
+	"database/sql"
+	"fmt"
 
-    "github.com/golang-migrate/migrate/v4"
-    "github.com/golang-migrate/migrate/v4/database/sqlite"
-    _ "github.com/golang-migrate/migrate/v4/source/file"
+	"github.com/golang-migrate/migrate/v4"
+	"github.com/golang-migrate/migrate/v4/database/postgres"
+	_ "github.com/golang-migrate/migrate/v4/source/file"
 )
 
 // RunMigrations runs migrations located in migrationsPath (e.g. "./migrations").
-// It attempts to use golang-migrate with the sqlite driver instance.
+// It attempts to use golang-migrate with the postgres driver instance.
 func RunMigrations(db *sql.DB, migrationsPath string) error {
-    driver, err := sqlite.WithInstance(db, &sqlite.Config{})
-    if err != nil {
-        return fmt.Errorf("sqlite driver instance: %w", err)
-    }
+	driver, err := postgres.WithInstance(db, &postgres.Config{})
+	if err != nil {
+		return fmt.Errorf("postgres driver instance: %w", err)
+	}
 
-    m, err := migrate.NewWithDatabaseInstance("file://"+migrationsPath, "sqlite3", driver)
-    if err != nil {
-        return fmt.Errorf("new migrate instance: %w", err)
-    }
+	m, err := migrate.NewWithDatabaseInstance("file://"+migrationsPath, "postgres", driver)
+	if err != nil {
+		return fmt.Errorf("new migrate instance: %w", err)
+	}
 
-    if err := m.Up(); err != nil && err != migrate.ErrNoChange {
-        return fmt.Errorf("migrate up: %w", err)
-    }
-    return nil
+	if err := m.Up(); err != nil && err != migrate.ErrNoChange {
+		return fmt.Errorf("migrate up: %w", err)
+	}
+	return nil
 }

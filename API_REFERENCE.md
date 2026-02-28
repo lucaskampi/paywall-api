@@ -1,13 +1,13 @@
 # Backend API Endpoints
 
-## Payment Flow Options
+## Payment Flow
 
-### Option 1: Checkout Session (Redirect Flow) - Recommended
-Use this for simpler integration - redirects user to Stripe-hosted checkout page.
+### Create Billing
 
 **Endpoint:** `POST /pay`
 
 **Request:**
+
 ```json
 {
   "name": "Username",
@@ -18,87 +18,35 @@ Use this for simpler integration - redirects user to Stripe-hosted checkout page
 ```
 
 **Response (201):**
+
 ```json
 {
   "status": "created",
-  "checkout_url": "https://checkout.stripe.com/c/pay/cs_test_...",
-  "session_id": "cs_test_..."
+  "checkout_url": "https://abacatepay.com/pay/...",
+  "session_id": "bill_123",
+  "billing_id": "bill_123"
 }
 ```
 
-**Frontend code:**
-```javascript
-const response = await fetch('http://localhost:8080/pay', {
-  method: 'POST',
-  headers: { 'Content-Type': 'application/json' },
-  body: JSON.stringify({ name, link, email, amount_cents })
-});
-const data = await response.json();
-// Redirect to Stripe Checkout
-window.location.href = data.checkout_url;
-// or: stripe.redirectToCheckout({ sessionId: data.session_id });
-```
+Use `checkout_url` to redirect the user to payment.
 
 ---
 
-### Option 2: PaymentIntent (In-Modal Flow) - For Stripe Elements
-Use this for in-app card collection using Stripe Elements.
+### Backward-Compatible Route
 
 **Endpoint:** `POST /create-payment-intent`
 
-**Request:**
-```json
-{
-  "name": "Username",
-  "link": "https://twitter.com/user",
-  "email": "user@example.com",
-  "amount_cents": 5000
-}
-```
-
-**Response (201):**
-```json
-{
-  "clientSecret": "pi_xxx_secret_xxx",
-  "paymentId": 14
-}
-```
-
-**Frontend code:**
-```javascript
-const response = await fetch('http://localhost:8080/create-payment-intent', {
-  method: 'POST',
-  headers: { 'Content-Type': 'application/json' },
-  body: JSON.stringify({ name, link, email, amount_cents })
-});
-const data = await response.json();
-// Use clientSecret with Stripe Elements
-const { error } = await stripe.confirmCardPayment(data.clientSecret, {
-  payment_method: {
-    card: cardElement,
-    billing_details: { name, email }
-  }
-});
-```
+This route now uses the same AbacatePay billing flow as `/pay` and returns the same response shape.
 
 ---
 
 ## Other Endpoints
 
-**GET /health**  
-Health check - returns "OK"
-
-**GET /leaderboard**  
-Returns paid payments ordered by amount (highest first)
-
-**GET /total**  
-Returns total amount invested
-
-**GET /ws**  
-WebSocket endpoint for real-time updates
-
-**POST /webhook**  
-Stripe webhook handler (for Stripe events)
+- **GET /health** — Health check
+- **GET /leaderboard** — Paid payments ordered by amount
+- **GET /total** — Total amount invested
+- **GET /ws** — WebSocket endpoint
+- **POST /webhook** — AbacatePay webhook receiver
 
 ---
 
@@ -107,26 +55,27 @@ Stripe webhook handler (for Stripe events)
 Connect to `ws://localhost:8080/ws`
 
 **Events received:**
-- `payment.created` - New payment created
-- `stripe.checkout.session.completed` - Payment succeeded
-- `stripe.checkout.session.expired` - Checkout expired
+- `payment.created` - new payment row created
+- `abacatepay.*` - provider webhook updates for subscribed billing id
 
-**Events you can send:**
+**Subscribe commands:**
+
 ```json
-{"type": "subscribe", "session_id": "cs_test_..."}
-{"type": "unsubscribe", "session_id": "cs_test_..."}
-{"type": "ping"}
+{"type": "subscribe", "session_id": "bill_123"}
+```
+
+```json
+{"type": "unsubscribe", "session_id": "bill_123"}
 ```
 
 ---
 
-## Environment Variables Required
+## Environment Variables
 
 ```env
-STRIPE_SECRET_KEY=sk_test_...
-STRIPE_WEBHOOK_SECRET=whsec_...
-STRIPE_SUCCESS_URL=http://localhost:3000/success
-STRIPE_CANCEL_URL=http://localhost:3000/cancel
-STRIPE_CURRENCY=usd
-STRIPE_PRODUCT_NAME=Paywall payment
+DATABASE_URL=postgres://postgres:postgres@localhost:5432/paywall?sslmode=disable
+ABACATEPAY_API_KEY=your_api_key_here
+ABACATEPAY_BASE_URL=https://api.abacatepay.com
+ABACATEPAY_CREATE_PATH=/v1/billing/create
+ABACATEPAY_WEBHOOK_SECRET=
 ```

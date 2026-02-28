@@ -3,64 +3,25 @@ package handlers
 import (
 	"database/sql"
 	"encoding/json"
+	"fmt"
+	"log"
 	"net/http"
-	"net/url"
-	"os"
+	"time"
 
-	"github.com/lucaskampi/paywall-api/db"
-	"github.com/stripe/stripe-go/v79"
-	checkoutsession "github.com/stripe/stripe-go/v79/checkout/session"
-	stripeprice "github.com/stripe/stripe-go/v79/price"
+	"github.com/lucaskampi/paywall-api/ws"
 )
 
-var writeCh chan<- db.WriteRequest
 var dbConn *sql.DB
 
-// Init sets up handlers package with DB connection and writer channel.
-func Init(conn *sql.DB, ch chan<- db.WriteRequest) {
+// Init sets up handlers package with DB connection.
+func Init(conn *sql.DB) {
 	dbConn = conn
-	writeCh = ch
 }
 
 // Pay handles POST /pay and writes a payment row into the payments table.
 func Pay(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		w.WriteHeader(http.StatusMethodNotAllowed)
-		return
-	}
-
-	stripeSecretKey := os.Getenv("STRIPE_SECRET_KEY")
-	if stripeSecretKey == "" {
-		// Backward compatibility with earlier config name.
-		stripeSecretKey = os.Getenv("STRIPE_KEY")
-	}
-	stripePriceID := os.Getenv("STRIPE_PRICE_ID")
-	stripeProductID := os.Getenv("STRIPE_PRODUCT_ID")
-	successURL := os.Getenv("STRIPE_SUCCESS_URL")
-	cancelURL := os.Getenv("STRIPE_CANCEL_URL")
-	currency := os.Getenv("STRIPE_CURRENCY")
-	if currency == "" {
-		currency = "usd"
-	}
-	productName := os.Getenv("STRIPE_PRODUCT_NAME")
-	if productName == "" {
-		productName = "Paywall payment"
-	}
-
-	if stripeSecretKey == "" {
-		http.Error(w, "missing STRIPE_SECRET_KEY", http.StatusInternalServerError)
-		return
-	}
-	if successURL == "" || cancelURL == "" {
-		http.Error(w, "missing STRIPE_SUCCESS_URL or STRIPE_CANCEL_URL", http.StatusInternalServerError)
-		return
-	}
-	if _, err := url.ParseRequestURI(successURL); err != nil {
-		http.Error(w, "invalid STRIPE_SUCCESS_URL", http.StatusInternalServerError)
-		return
-	}
-	if _, err := url.ParseRequestURI(cancelURL); err != nil {
-		http.Error(w, "invalid STRIPE_CANCEL_URL", http.StatusInternalServerError)
 		return
 	}
 
@@ -78,110 +39,71 @@ func Pay(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "missing fields", http.StatusBadRequest)
 		return
 	}
-	if stripePriceID == "" && payload.AmountCents <= 0 {
+	if payload.AmountCents <= 0 {
 		http.Error(w, "missing fields", http.StatusBadRequest)
 		return
 	}
 
-	if writeCh == nil {
+	if dbConn == nil {
 		http.Error(w, "server not ready", http.StatusServiceUnavailable)
 		return
 	}
 
-	stripe.Key = stripeSecretKey
-	params := &stripe.CheckoutSessionParams{
-		Mode:               stripe.String(string(stripe.CheckoutSessionModePayment)),
-		SuccessURL:         stripe.String(successURL),
-		CancelURL:          stripe.String(cancelURL),
-		PaymentMethodTypes: stripe.StringSlice([]string{"card"}),
-		Metadata: map[string]string{
-			"name":  payload.Name,
-			"link":  payload.Link,
-			"email": payload.Email,
-		},
-	}
-	if payload.Email != "" {
-		params.CustomerEmail = stripe.String(payload.Email)
-	}
-
-	amountCentsForDB := payload.AmountCents
-	currencyForDB := currency
-
-	// Prefer a pre-created Stripe Price (fixed amount) if provided.
-	if stripePriceID != "" {
-		p, err := stripeprice.Get(stripePriceID, nil)
-		if err != nil {
-			http.Error(w, "invalid STRIPE_PRICE_ID", http.StatusBadGateway)
-			return
-		}
-		if p != nil {
-			// Keep DB consistent with Stripe's configured amount/currency.
-			if p.UnitAmount > 0 {
-				amountCentsForDB = p.UnitAmount
-			}
-			if p.Currency != "" {
-				currencyForDB = string(p.Currency)
-			}
-		}
-		params.LineItems = []*stripe.CheckoutSessionLineItemParams{
-			{
-				Quantity: stripe.Int64(1),
-				Price:    stripe.String(stripePriceID),
-			},
-		}
-	} else {
-		// Dynamic amount: create price data on the fly.
-		pd := &stripe.CheckoutSessionLineItemPriceDataParams{
-			Currency:   stripe.String(currency),
-			UnitAmount: stripe.Int64(payload.AmountCents),
-		}
-		if stripeProductID != "" {
-			pd.Product = stripe.String(stripeProductID)
-		} else {
-			pd.ProductData = &stripe.CheckoutSessionLineItemPriceDataProductDataParams{
-				Name: stripe.String(productName),
-			}
-		}
-
-		params.LineItems = []*stripe.CheckoutSessionLineItemParams{
-			{
-				Quantity:  stripe.Int64(1),
-				PriceData: pd,
-			},
-		}
-	}
-
-	cs, err := checkoutsession.New(params)
+	client, err := newAbacatePayClientFromEnv()
 	if err != nil {
-		http.Error(w, "failed to create checkout session", http.StatusBadGateway)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	errCh := make(chan error, 1)
-	idCh := make(chan int64, 1)
-	writeCh <- db.WriteRequest{
-		Query: "INSERT INTO payments (name, link, email, amount_cents, status, currency, provider, stripe_checkout_session_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-		Args:  []interface{}{payload.Name, payload.Link, payload.Email, amountCentsForDB, "pending", currencyForDB, "stripe", cs.ID},
-		ErrCh: errCh,
-		IDCh:  idCh,
+	description := fmt.Sprintf("%s - %s", payload.Name, payload.Link)
+	billing, err := client.CreateBilling(payload.AmountCents, description, payload.Name, payload.Email)
+	if err != nil {
+		log.Printf("abacatepay create billing failed: %v", err)
+		http.Error(w, "failed to create abacatepay billing", http.StatusBadGateway)
+		return
 	}
-	if err := <-errCh; err != nil {
+
+	var paymentID int64
+	var createdAt time.Time
+	if err := dbConn.QueryRow(
+		"INSERT INTO payments (name, link, email, amount_cents, status, currency, provider, provider_charge_id, provider_checkout_url) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id, created_at",
+		payload.Name,
+		payload.Link,
+		payload.Email,
+		payload.AmountCents,
+		normalizeProviderStatus(billing.Status),
+		"brl",
+		"abacatepay",
+		billing.ID,
+		billing.URL,
+	).Scan(&paymentID, &createdAt); err != nil {
 		http.Error(w, "write failed", http.StatusInternalServerError)
 		return
 	}
-	// Wait for inserted id to be returned by writer (timeout is avoided because writer is local)
-	select {
-	case <-idCh:
-		// ok, inserted id received (ignored)
-	default:
-		// no id available
-	}
+
+	broadcastPaymentCreated(paymentID, payload.Name, payload.Link, payload.Email, payload.AmountCents, createdAt)
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(map[string]string{
 		"status":       "created",
-		"checkout_url": cs.URL,
-		"session_id":   cs.ID,
+		"checkout_url": billing.URL,
+		"session_id":   billing.ID,
+		"billing_id":   billing.ID,
+	})
+}
+
+func broadcastPaymentCreated(id int64, name string, link string, email string, amount int64, createdAt time.Time) {
+	ws.Broadcast(map[string]interface{}{
+		"type":  "payment_created",
+		"event": "payment.created",
+		"payment": map[string]interface{}{
+			"id":           id,
+			"name":         name,
+			"link":         link,
+			"email":        email,
+			"amount_cents": amount,
+			"created_at":   createdAt.UTC().Format(time.RFC3339),
+		},
 	})
 }
