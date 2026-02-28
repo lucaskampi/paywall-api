@@ -4,26 +4,19 @@
 package main
 
 import (
-	"database/sql"
 	"log"
 
-	_ "modernc.org/sqlite"
+	"github.com/lucaskampi/paywall-api/db"
 )
 
 func main() {
-	db, err := sql.Open("sqlite", "file:./data/paywall.db?_busy_timeout=5000")
+	dbConn, err := db.Connect()
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer db.Close()
+	defer dbConn.Close()
 
-	if _, err := db.Exec("DELETE FROM payments"); err != nil {
-		log.Fatal(err)
-	}
-	if _, err := db.Exec("DELETE FROM sqlite_sequence WHERE name='payments'"); err != nil {
-		log.Fatal(err)
-	}
-	if _, err := db.Exec("VACUUM"); err != nil {
+	if _, err := dbConn.Exec("TRUNCATE TABLE payments RESTART IDENTITY CASCADE"); err != nil {
 		log.Fatal(err)
 	}
 

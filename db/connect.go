@@ -1,43 +1,51 @@
 package db
 
 import (
-    "database/sql"
-    "fmt"
-    "os"
+	"database/sql"
+	"fmt"
+	"os"
+	"strconv"
+	"time"
 
-    _ "modernc.org/sqlite"
+	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
-// Connect opens a SQLite database using DATABASE_URL or a sensible default.
+// Connect opens a PostgreSQL database using DATABASE_URL.
 func Connect() (*sql.DB, error) {
-    dsn := os.Getenv("DATABASE_URL")
-    if dsn == "" {
-        // file: URI form supports query params
-        dsn = "file:./data/paywall.db?_busy_timeout=5000&_foreign_keys=1"
-    }
+	dsn := os.Getenv("DATABASE_URL")
+	if dsn == "" {
+		dsn = "postgres://postgres:postgres@localhost:5432/paywall?sslmode=disable"
+	}
 
-    db, err := sql.Open("sqlite", dsn)
-    if err != nil {
-        return nil, fmt.Errorf("open sqlite: %w", err)
-    }
+	db, err := sql.Open("pgx", dsn)
+	if err != nil {
+		return nil, fmt.Errorf("open postgres: %w", err)
+	}
 
-    // SQLite performs best with a small connection pool in-process.
-    db.SetMaxOpenConns(1)
-    db.SetMaxIdleConns(1)
+	maxOpenConns := getenvInt("DB_MAX_OPEN_CONNS", 20)
+	maxIdleConns := getenvInt("DB_MAX_IDLE_CONNS", 5)
+	maxLifetimeMinutes := getenvInt("DB_CONN_MAX_LIFETIME_MIN", 30)
 
-    // Apply PRAGMAs to improve integrity and concurrency.
-    if _, err := db.Exec("PRAGMA foreign_keys = ON;"); err != nil {
-        db.Close()
-        return nil, fmt.Errorf("enable foreign_keys: %w", err)
-    }
-    if _, err := db.Exec("PRAGMA journal_mode = WAL;"); err != nil {
-        db.Close()
-        return nil, fmt.Errorf("set journal_mode WAL: %w", err)
-    }
-    if _, err := db.Exec("PRAGMA busy_timeout = 5000;"); err != nil {
-        db.Close()
-        return nil, fmt.Errorf("set busy_timeout: %w", err)
-    }
+	db.SetMaxOpenConns(maxOpenConns)
+	db.SetMaxIdleConns(maxIdleConns)
+	db.SetConnMaxLifetime(time.Duration(maxLifetimeMinutes) * time.Minute)
 
-    return db, nil
+	if err := db.Ping(); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("ping postgres: %w", err)
+	}
+
+	return db, nil
+}
+
+func getenvInt(key string, fallback int) int {
+	value := os.Getenv(key)
+	if value == "" {
+		return fallback
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil || parsed <= 0 {
+		return fallback
+	}
+	return parsed
 }
