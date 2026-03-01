@@ -5,6 +5,7 @@ go 1.25.6
 require (
 	github.com/golang-migrate/migrate/v4 v4.19.1
 	github.com/jackc/pgx/v5 v5.5.4
+	github.com/stripe/stripe-go/v82 v82.5.1
 	nhooyr.io/websocket v1.8.17
 )
 

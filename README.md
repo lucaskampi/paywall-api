@@ -1,11 +1,11 @@
 # paywall-api
 
-Backend API for a pay-to-rank leaderboard in Go, using PostgreSQL and AbacatePay.
+Backend API for a pay-to-rank leaderboard in Go, using PostgreSQL and Stripe.
 
 ## Quick Start
 
 1. Set PostgreSQL DSN in `DATABASE_URL`.
-2. Set `ABACATEPAY_API_KEY`.
+2. Set `STRIPE_SECRET_KEY`.
 3. Run:
 
 ```bash
@@ -18,7 +18,7 @@ Server starts on `http://localhost:8080`.
 
 ```env
 DATABASE_URL=postgres://postgres:postgres@localhost:5432/paywall?sslmode=disable
-ABACATEPAY_API_KEY=your_api_key_here
+STRIPE_SECRET_KEY=sk_test_xxx
 ```
 
 ## Optional Environment Variables
@@ -26,10 +26,7 @@ ABACATEPAY_API_KEY=your_api_key_here
 ```env
 PORT=8080
 FRONTEND_ORIGIN=http://localhost:3000
-ABACATEPAY_BASE_URL=https://api.abacatepay.com
-ABACATEPAY_CREATE_PATH=/v1/billing/create
-ABACATEPAY_TIMEOUT_SECONDS=15
-ABACATEPAY_WEBHOOK_SECRET=
+STRIPE_WEBHOOK_SECRET=whsec_xxx
 DB_MAX_OPEN_CONNS=20
 DB_MAX_IDLE_CONNS=5
 DB_CONN_MAX_LIFETIME_MIN=30
@@ -39,13 +36,14 @@ DB_CONN_MAX_LIFETIME_MIN=30
 
 - `GET /health`
 - `GET /leaderboard`
-- `POST /pay`
-- `POST /create-payment-intent` (compat route; same behavior as `/pay`)
+- `POST /pay` (compat route; delegates to create payment intent)
+- `POST /create-payment-intent`
+- `POST /pay/confirm`
 - `POST /webhook`
 - `GET /total`
 - `GET /ws`
 
-## Payment Request (`POST /pay`)
+## Payment Intent Request (`POST /create-payment-intent`)
 
 Request body:
 
@@ -62,17 +60,15 @@ Response:
 
 ```json
 {
-  "status": "created",
-  "checkout_url": "https://...",
-  "session_id": "bill_xxx",
-  "billing_id": "bill_xxx"
+  "clientSecret": "pi_xxx_secret_xxx",
+  "paymentIntentId": "pi_xxx"
 }
 ```
 
 ## Webhooks
 
-- Configure AbacatePay webhook URL to `POST /webhook`.
-- If `ABACATEPAY_WEBHOOK_SECRET` is set, signature validation is enforced.
+- Configure Stripe webhook URL to `POST /webhook`.
+- If `STRIPE_WEBHOOK_SECRET` is set, signature validation is enforced.
 - Webhook events are idempotent via the `webhook_events` table.
 
 ## Local Helpers
